@@ -118,6 +118,11 @@ class LLMReport:
         return "engine NOT reachable:\n  " + "\n  ".join(self.findings)
 
 
+# Above this magnitude a "logprob" is an engine sentinel for -inf, not a measurement (vLLM uses
+# -9999). Real values stay in the tens even in the tail of a 150k vocabulary.
+_SENTINEL_LOGPROB = 100.0
+
+
 def _raw_logprobs_allowed() -> bool:
     """Whether an operator has explicitly accepted raw logprobs on the training path.
 
@@ -414,6 +419,28 @@ def probe_logprobs_mode(
             reverse=True,
         )
         if len(values) < 2:
+            return "unknown"
+        # Too PEAKED to divide by, the mirror of the flatness guard below. When the runner-up is
+        # -inf the engine reports a sentinel (vLLM: -9999), and +-inf is unchanged by division, so
+        # the ratio is 1.0 at every temperature and processed logprobs get misread as raw.
+        #
+        # This is not hypothetical. A reasoning model's chat template FORCES its first token --
+        # `<think>` for Qwen3, at p~1.0 with every alternative at -inf -- and position 1 is exactly
+        # where this probe measures, by design, because it is the only position independent of
+        # sampling. Measured on a live Qwen3-8B served WITH --logprobs-mode processed_logprobs:
+        #
+        #     position 1 (forced <think>):  gap 9999.0 @T=1.0 -> 9999.0 @T=2.0   ratio 1.000  "raw"
+        #     position 1 after prefilling past <think>:
+        #                                   gap 3.7500 @T=1.0 -> 1.8750 @T=2.0   ratio 0.500  processed
+        #
+        # Three trials each; the second form is the same method at a non-degenerate position and
+        # agrees with the flag the engine was actually launched with. Without this guard every
+        # reasoning model with a forced opening token is demoted to the eval tier and every rollout
+        # comes back 409, which reads as "this model cannot train" rather than "this probe cannot
+        # measure". Real logprobs never approach this magnitude (a 150k-vocab tail bottoms out in the
+        # tens), so the threshold separates sentinels from data without needing to know the engine's
+        # chosen sentinel value.
+        if abs(values[1]) > _SENTINEL_LOGPROB:
             return "unknown"
         gaps.append(values[0] - values[1])
 
