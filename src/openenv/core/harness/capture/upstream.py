@@ -84,6 +84,10 @@ class UpstreamError(RuntimeError):
     """Any failure talking to the engine. Never leaks httpx types to callers."""
 
 
+class UpstreamRequestError(UpstreamError):
+    """The caller's request cannot be represented by the selected inference backend."""
+
+
 class UpstreamHTTPError(UpstreamError):
     """Engine answered with a non-2xx status."""
 

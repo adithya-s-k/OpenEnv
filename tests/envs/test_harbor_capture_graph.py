@@ -86,6 +86,17 @@ def test_linking_ignores_arrival_order():
     assert other.parent_id is None
 
 
+def test_normalized_response_drift_starts_a_new_training_root():
+    g = RolloutGraph()
+    g.add_turn(node("parent", [1, 2], [3, 4]))
+
+    # A renderer normalized the echoed assistant response token (4 -> 9).
+    child = g.add_turn(node("child", [1, 2, 3, 9, 10], [11]))
+
+    assert child.parent_id is None
+    assert g.sequence_for(child.node_id).input_ids == [1, 2, 3, 9, 10, 11]
+
+
 # --- forks and discards -----------------------------------------------------
 def test_two_children_of_one_node_are_a_fork():
     g = RolloutGraph()
