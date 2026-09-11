@@ -61,7 +61,12 @@ from .sessions import (
     SessionRegistry,
     Upstream,
 )
-from .upstream import InferenceClient, truncating_params, UpstreamError
+from .upstream import (
+    InferenceClient,
+    truncating_params,
+    UpstreamError,
+    UpstreamRequestError,
+)
 from .validate import check_turn, check_turn_eval
 
 logger = logging.getLogger("intercept")
@@ -646,6 +651,17 @@ def create_app(
             status_code=401,
         )
 
+    def _invalid_request(message: str) -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": {
+                    "message": message,
+                    "type": "invalid_request_error",
+                }
+            },
+            status_code=400,
+        )
+
     @app.post("/sessions")
     async def create_session(
         request: Request, payload: dict[str, Any] | None = None
@@ -663,6 +679,21 @@ def create_app(
         if not _admin_ok(request):
             return _forbidden()
         payload = payload or {}
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return _invalid_request("metadata must be a JSON object")
+        metadata = metadata or {}
+        reserved_metadata_keys = {
+            "session_id",
+            "upstream",
+            "capture_level",
+        } & metadata.keys()
+        if reserved_metadata_keys:
+            noun = "key" if len(reserved_metadata_keys) == 1 else "keys"
+            return _invalid_request(
+                f"metadata cannot include reserved {noun}: "
+                f"{', '.join(sorted(reserved_metadata_keys))}"
+            )
         upstream = None
         level = ""
         llm_url = str(payload.get("llm_url") or "").strip()
@@ -683,7 +714,7 @@ def create_app(
             payload.get("session_id"),
             upstream=upstream,
             capture_level=level,
-            **(payload.get("metadata") or {}),
+            **metadata,
         )
         effective = _level_of(session)
         return {
@@ -796,9 +827,9 @@ def create_app(
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
-            return JSONResponse(
-                {"error": {"message": "body must be JSON"}}, status_code=400
-            )
+            return _invalid_request("body must be JSON")
+        if not isinstance(body, dict):
+            return _invalid_request("body must be a JSON object")
 
         # Answered, never recorded. Must come before session routing and dialect handling: an aux
         # route is not a model turn, so it has no business creating a node or a session.
@@ -840,7 +871,10 @@ def create_app(
         served_model = _model_of(session)
         if served_model:
             incoming["_served_model"] = served_model
-        chat_request = transformer.transform_request(incoming)
+        try:
+            chat_request = transformer.transform_request(incoming)
+        except UpstreamRequestError as exc:
+            return _invalid_request(str(exc))
         if served_model:
             chat_request["model"] = served_model
         normalise_for_capture(chat_request)
