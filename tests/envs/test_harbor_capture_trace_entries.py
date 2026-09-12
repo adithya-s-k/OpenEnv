@@ -66,12 +66,21 @@ def test_fresh_session_returns_an_empty_entry_list(client: TestClient) -> None:
 def test_trace_entry_carries_exactly_the_documented_keys() -> None:
     # Consumers index these by name to build training rows, so a rename breaks them silently --
     # the token fields simply read empty and the rollout looks like it learned nothing.
+    #
+    # `prompt_token_ids`, `loss_mask`, `reward` and `metadata` were added 2026-09. The first is the
+    # load-bearing one: without it a consumer must re-render the prompt with apply_chat_template,
+    # which matched the engine on 0 of 28 measured turns on Qwen3.5-4B and collapsed a run at its
+    # first weight update.
     assert set(TraceEntry.__annotations__) == {
         "request",
         "response",
+        "prompt_token_ids",
         "completion_token_ids",
         "completion_tokens",
         "per_token_logps",
+        "loss_mask",
+        "reward",
+        "metadata",
     }
 
 

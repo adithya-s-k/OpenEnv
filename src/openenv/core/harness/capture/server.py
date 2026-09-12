@@ -477,6 +477,28 @@ class UpstreamPool:
             return model, "text"
 
 
+def _budget_stop_response(model: str) -> dict[str, Any]:
+    """A terminal chat-completion, in the shape every dialect transformer expects on the way out.
+
+    Deliberately empty content rather than an explanation. The agent's loop reads `finish_reason` and
+    stops; any text here would land in the harness's own transcript as something the model said, and
+    it did not say it.
+    """
+    return {
+        "id": f"budget-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "", "tool_calls": None},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
 def create_app(
     *,
     llm_url: str = "",
@@ -488,6 +510,7 @@ def create_app(
     auth_header: str = "Authorization",
     capture_level: str = "tokens",
     admin_key: str | None = None,
+    max_model_calls: int = 0,
 ) -> FastAPI:
     """The capture proxy as an ASGI app.
 
@@ -516,6 +539,13 @@ def create_app(
         admin_key (`str`, *optional*):
             Required by the session-management routes when set. Leave unset for a private port; set it
             whenever this app is reachable from outside, which `serve` does automatically.
+        max_model_calls (`int`, *optional*, defaults to `0`):
+            Default ceiling on model calls per session; `0` is unlimited, and a session may name its
+            own. Once a rollout reaches it the proxy answers a terminal completion itself, which ends
+            the agent's loop without recording a turn the model never generated. Worth setting on any
+            training deployment: no agent harness honours its own step config (opencode 1.18.30 ran 61
+            model calls at `steps=3`, `maxSteps=3` and unset alike), and one runaway rollout holds its
+            whole GRPO group hostage.
     """
     app = FastAPI(title="openenv-capture")
 
@@ -542,6 +572,7 @@ def create_app(
     app.state.transforms = TransformManager()
     app.state.registry = SessionRegistry(require_registered=require_registered)
     app.state.model = model
+    app.state.max_model_calls = max_model_calls
     app.state.llm_url = llm_url
     app.state.max_output_tokens = max_output_tokens
     app.state.capture_level = capture_level
@@ -683,6 +714,11 @@ def create_app(
             payload.get("session_id"),
             upstream=upstream,
             capture_level=level,
+            # Falls back to the server default, so a deployment can cap every rollout without its
+            # callers knowing, and a caller can still tighten it per rollout.
+            max_model_calls=int(
+                payload.get("max_model_calls") or app.state.max_model_calls
+            ),
             **(payload.get("metadata") or {}),
         )
         effective = _level_of(session)
@@ -690,6 +726,7 @@ def create_app(
             "session_id": session.session_id,
             "capture_level": effective,
             "rollout_type": "train" if effective == "tokens" else "eval",
+            "max_model_calls": session.max_model_calls,
             "llm_url": upstream.llm_url if upstream else app.state.llm_url,
             "model": upstream.model if upstream else app.state.model,
         }
@@ -824,6 +861,31 @@ def create_app(
 
         api_type: APIType = detect(f"/{path}", headers, body)
         transformer = app.state.transforms.get(api_type)
+
+        # BUDGET CHECK, BEFORE ANYTHING IS FORWARDED OR RECORDED.
+        #
+        # Answering the stop ourselves is the whole mechanism. The same experiment that showed
+        # opencode ignores its own `steps` setting also showed what does end its loop: a plain
+        # assistant message with `finish_reason="stop"` and no tool calls terminates cleanly and
+        # `opencode run` exits 0. So the loop ends without a kill, and because this returns before
+        # `_ingest`, CAPTURE NEVER SEES IT -- no turn the model did not generate can enter the
+        # training data.
+        #
+        # This bounds cost and wall clock, nothing else. It is not a nudge and says nothing about the
+        # task: shaping what an agent does with its last turns is the environment's business, and
+        # putting task text here would put it in every environment's rollouts.
+        if session.over_budget:
+            logger.info(
+                "session %s hit its model-call budget (%d); ending the agent loop",
+                session.session_id,
+                session.max_model_calls,
+            )
+            return JSONResponse(
+                transformer.transform_response(
+                    _budget_stop_response(_model_of(session) or app.state.model), body
+                )
+            )
+        session.model_calls += 1
 
         original_request = dict(body)
         # Include the query string: Google puts `alt=sse` there, not in the body.

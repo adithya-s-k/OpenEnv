@@ -109,6 +109,25 @@ class Session:
     # Empty means "not measured here", so the server default applies. Never assumed optimistically:
     # claiming `tokens` without evidence is how an eval rollout gets stamped trainable.
     capture_level: str = ""
+    # Model calls FORWARDED for this rollout, and the ceiling. 0 means unlimited.
+    #
+    # Counted on forward rather than read off the graph, because a turn whose logprobs were rejected
+    # never becomes a node yet still cost an engine call — counting nodes would let a rollout that
+    # fails validation on every turn run forever.
+    #
+    # A ceiling is needed at all because NO AGENT HARNESS HONOURS ITS OWN STEP CONFIG. Measured on
+    # opencode 1.18.30 against a fake engine that always asks for one more tool call:
+    # `agent.build.steps=3`, `maxSteps=3` and no setting at all each produced 61 model calls — the
+    # fake server's own hard stop, i.e. nothing else ever ended the loop. The proxy is the only
+    # component that sees every call, and the API key IS the rollout, so a counter here is exactly a
+    # per-rollout step count.
+    model_calls: int = 0
+    max_model_calls: int = 0
+
+    @property
+    def over_budget(self) -> bool:
+        """Whether this rollout has spent its model-call budget."""
+        return self.max_model_calls > 0 and self.model_calls >= self.max_model_calls
 
     @property
     def idle_seconds(self) -> float:
@@ -130,6 +149,7 @@ class SessionRegistry:
         *,
         upstream: Upstream | None = None,
         capture_level: str = "",
+        max_model_calls: int = 0,
         **metadata: Any,
     ) -> Session:
         sid = clean_session_id(session_id) or f"s{secrets.token_hex(12)}"
@@ -140,6 +160,10 @@ class SessionRegistry:
                 session.upstream = upstream
             if capture_level:
                 session.capture_level = capture_level
+            # Per session, not per server: one deployment serves a training run that wants a tight
+            # cap and an evaluation run that wants none, at the same time.
+            if max_model_calls:
+                session.max_model_calls = max_model_calls
             self._sessions[sid] = session
         return session
 

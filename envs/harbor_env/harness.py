@@ -137,8 +137,24 @@ def to_trace_entries(result: HarborRolloutResult) -> list[dict[str, Any]]:
                         }
                     ]
                 },
+                # The engine's own tokenization, carried through rather than dropped. HarborTurn has
+                # held this since it was introduced ("not a local re-render", models.py); it simply
+                # had nowhere to go until TraceEntry gained the field. A consumer that has it must
+                # not call apply_chat_template -- that re-render matched the engine on 0 of 28
+                # measured turns and collapsed a run at its first weight update.
+                "prompt_token_ids": list(turn.prompt_token_ids),
                 "completion_token_ids": list(turn.completion_token_ids),
                 "per_token_logps": list(turn.per_token_logps),
+                # Every turn reaching here passed `turn.trainable` above, so the mask is context
+                # across the prompt and train across the sample. Emitted rather than inferred for
+                # the same reason as in capture.contract: the filter is invisible downstream.
+                "loss_mask": [0] * len(turn.prompt_token_ids)
+                + [1] * len(turn.completion_token_ids),
+                "metadata": {
+                    "turn": turn.turn,
+                    "n_tools": turn.n_tools,
+                    "finish_reason": turn.finish_reason,
+                },
             }
         )
     return entries

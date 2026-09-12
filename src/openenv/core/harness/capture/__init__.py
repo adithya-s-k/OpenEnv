@@ -16,10 +16,12 @@ cross-checked against the harness's own trace.
 from .contract import measure_retokenization_skew, to_trace_entries, to_turn_records
 from .detection import APIType, detect
 from .graph import RolloutGraph, TurnNode
+from .runner import CaptureServer
 from .upstream import InferenceClient, UpstreamError
 from .validate_llm import LLMReport, require_llm, validate_llm
 
 __all__ = [
+    "CaptureServer",
     "to_turn_records",
     "to_trace_entries",
     "measure_retokenization_skew",

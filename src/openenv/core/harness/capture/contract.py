@@ -109,7 +109,19 @@ def _agent_nodes(graph: RolloutGraph, document: dict[str, Any]) -> list[TurnNode
 def to_trace_entries(
     graph: RolloutGraph, document: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """Rollout graph -> TRL `list[TraceEntry]`. Works with TRL today, at the cost of re-tokenization.
+    """Rollout graph -> `list[TraceEntry]`, carrying the ENGINE's own prompt tokenization.
+
+    Every entry includes `prompt_token_ids` and `loss_mask`, so a consumer never re-tokenizes. This
+    used to emit neither, on the reasoning that a consumer could re-derive the prompt from
+    `request`. It cannot: measured on Qwen3.5-4B over 28 live turns, a local re-render matched the
+    engine on ZERO of them, and training on the difference collapsed a run at its first weight
+    update. The ids were always here in `node.prompt_ids`; they were simply dropped at this
+    boundary.
+
+    `loss_mask` spans `prompt_token_ids + completion_token_ids`: 0 across the prompt (context) and 1
+    across the sampled tokens, EXCEPT where `graph.sequence_for` masked a turn out because its
+    logprobs were rejected on ingest -- there the tokens stay as context and the mask stays 0, which
+    is not inferable downstream.
 
     Auxiliary roots and discarded retries are already excluded here, so the caller does not need an
     `agent_turn_fn`. That hook exists because a flat trace cannot tell an aux call from an agent
@@ -139,8 +151,23 @@ def to_trace_entries(
                         }
                     ]
                 },
+                "prompt_token_ids": node.prompt_ids,
                 "completion_token_ids": node.sampled_ids,
                 "per_token_logps": node.sampled_logprobs or [],
+                # Deterministic here because `_usable` already skipped every turn whose logprobs
+                # were rejected on ingest -- so anything that reaches this line is fully trainable,
+                # and the mask is simply context across the prompt, train across the sample. The
+                # field is emitted anyway rather than left for the consumer to synthesise: a
+                # consumer that assumes "all sampled tokens are trainable" is right only because of
+                # a filter it cannot see from here.
+                "loss_mask": [0] * len(node.prompt_ids) + [1] * len(node.sampled_ids),
+                "metadata": {
+                    "node_id": node.node_id,
+                    "index": node.index,
+                    "model": node.model,
+                    "n_tools": node.n_tools,
+                    "harness_session_id": node.harness_session_id,
+                },
             }
         )
     return entries

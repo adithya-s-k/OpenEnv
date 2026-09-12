@@ -23,7 +23,7 @@ import secrets
 import threading
 from typing import Any
 
-from .runner import CaptureServer
+from openenv.core.harness.capture import CaptureServer
 
 # Where the capture app is mounted when the env server hosts it directly.
 CAPTURE_MOUNT = "/capture"
