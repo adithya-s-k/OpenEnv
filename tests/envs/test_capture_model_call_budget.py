@@ -99,10 +99,52 @@ def test_the_capped_turn_is_terminal_and_never_captured(app_and_engine):
     # Terminal: this is what actually ends the agent's loop. opencode exits 0 on it.
     assert over["choices"][0]["finish_reason"] == "stop"
     assert not over["choices"][0]["message"].get("tool_calls")
-    # Empty, not an explanation: the model did not say anything, so nothing may be attributed to it.
-    assert over["choices"][0]["message"]["content"] == ""
+    # Non-empty: an empty assistant message reads as a failed generation and is retried. See
+    # `test_the_stop_message_is_not_empty`.
+    assert over["choices"][0]["message"]["content"].strip()
     # And it is not in the graph. A synthetic turn in the training data is the failure this guards.
     assert session.graph.stats()["n_turns"] == 1
+
+
+def test_the_stop_is_streamed_when_the_caller_streams(app_and_engine):
+    """A streaming caller must get SSE back, not a JSON body.
+
+    This is the failure that made the cap useless in practice. opencode streams; answering it with a
+    plain JSON body did not end its loop, so it retried, the proxy answered the stop again, and the
+    rollout spun until its timeout -- "budget enforced" in the log, forever.
+    """
+    app, engine = app_and_engine
+    session = app.state.registry.create(max_model_calls=1)
+    with TestClient(app) as client:
+        _chat(client, session.session_id)  # spends the budget
+        over = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {session.session_id}"},
+            json={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        )
+
+    assert over.status_code == 200
+    assert over.headers["content-type"].startswith("text/event-stream")
+    body = over.text
+    assert "data: " in body and "[DONE]" in body
+    # The terminal signal has to be in the stream, or the loop never learns it should stop.
+    assert '"finish_reason": "stop"' in body or '"finish_reason":"stop"' in body
+    # And still nothing synthetic in the graph.
+    assert session.graph.stats()["n_turns"] == 1
+
+
+def test_the_stop_message_is_not_empty(app_and_engine):
+    """An empty assistant message reads as a failed generation and gets retried."""
+    app, engine = app_and_engine
+    session = app.state.registry.create(max_model_calls=1)
+    with TestClient(app) as client:
+        _chat(client, session.session_id)
+        over = _chat(client, session.session_id).json()
+    assert over["choices"][0]["message"]["content"].strip()
 
 
 def test_zero_means_unlimited(app_and_engine):

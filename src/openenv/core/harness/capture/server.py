@@ -480,9 +480,11 @@ class UpstreamPool:
 def _budget_stop_response(model: str) -> dict[str, Any]:
     """A terminal chat-completion, in the shape every dialect transformer expects on the way out.
 
-    Deliberately empty content rather than an explanation. The agent's loop reads `finish_reason` and
-    stops; any text here would land in the harness's own transcript as something the model said, and
-    it did not say it.
+    The content is NON-EMPTY on purpose. An empty assistant message reads as a failed generation and
+    the harness retries it, so the proxy answers the stop again and the rollout spins until its
+    timeout -- measured, with opencode looping on exactly this. It is deliberately a statement about
+    the BUDGET rather than about the task: it lands in the harness's own transcript, and capture never
+    records it, so it must not look like something the model chose to say about the work.
     """
     return {
         "id": f"budget-{uuid.uuid4().hex[:12]}",
@@ -491,7 +493,11 @@ def _budget_stop_response(model: str) -> dict[str, Any]:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": "", "tool_calls": None},
+                "message": {
+                    "role": "assistant",
+                    "content": "Step budget exhausted; stopping.",
+                    "tool_calls": None,
+                },
                 "finish_reason": "stop",
             }
         ],
@@ -862,30 +868,6 @@ def create_app(
         api_type: APIType = detect(f"/{path}", headers, body)
         transformer = app.state.transforms.get(api_type)
 
-        # BUDGET CHECK, BEFORE ANYTHING IS FORWARDED OR RECORDED.
-        #
-        # Answering the stop ourselves is the whole mechanism. The same experiment that showed
-        # opencode ignores its own `steps` setting also showed what does end its loop: a plain
-        # assistant message with `finish_reason="stop"` and no tool calls terminates cleanly and
-        # `opencode run` exits 0. So the loop ends without a kill, and because this returns before
-        # `_ingest`, CAPTURE NEVER SEES IT -- no turn the model did not generate can enter the
-        # training data.
-        #
-        # This bounds cost and wall clock, nothing else. It is not a nudge and says nothing about the
-        # task: shaping what an agent does with its last turns is the environment's business, and
-        # putting task text here would put it in every environment's rollouts.
-        if session.over_budget:
-            logger.info(
-                "session %s hit its model-call budget (%d); ending the agent loop",
-                session.session_id,
-                session.max_model_calls,
-            )
-            return JSONResponse(
-                transformer.transform_response(
-                    _budget_stop_response(_model_of(session) or app.state.model), body
-                )
-            )
-        session.model_calls += 1
 
         original_request = dict(body)
         # Include the query string: Google puts `alt=sse` there, not in the body.
@@ -893,6 +875,40 @@ def create_app(
             f"/{path}?{request.url.query}" if request.url.query else f"/{path}"
         )
         client_wants_stream = wants_stream(full_target, body)
+
+        # BUDGET CHECK, BEFORE ANYTHING IS FORWARDED OR RECORDED.
+        #
+        # Placed after `client_wants_stream` deliberately. Answering a STREAMING request with a plain
+        # JSON body does not end the agent's loop -- opencode streams, and it simply retried, so the
+        # proxy answered the stop over and over while the rollout burned its whole timeout. The reply
+        # has to go back in the dialect the caller asked for, which is what `sse.replay` is for.
+        #
+        # The same experiment that showed opencode ignores its own `steps` setting also showed what
+        # DOES end its loop: a plain assistant message with `finish_reason="stop"` and no tool calls
+        # terminates cleanly and `opencode run` exits 0. The content must be non-empty -- an empty
+        # assistant message reads as a failed generation and gets retried.
+        #
+        # Because this returns before `_ingest`, CAPTURE NEVER SEES IT, so no turn the model did not
+        # generate can enter the training data. It bounds cost and wall clock and nothing else: it is
+        # not a nudge and says nothing about the task, because shaping what an agent does with its
+        # last turns is the environment's business, not every environment's.
+        if session.over_budget:
+            logger.info(
+                "session %s hit its model-call budget (%d); ending the agent loop",
+                session.session_id,
+                session.max_model_calls,
+            )
+            stop = _budget_stop_response(_model_of(session) or app.state.model)
+            if client_wants_stream:
+                return StreamingResponse(
+                    sse.replay(api_type, transformer, stop, original_request),
+                    media_type="text/event-stream",
+                    headers=sse.SSE_HEADERS,
+                )
+            payload = transformer.transform_response(stop, original_request)
+            normalise_client_payload(payload, api_type)
+            return JSONResponse(payload)
+        session.model_calls += 1
         # The served model name has to be on the body BEFORE the transformer runs: each dialect
         # reads `_served_model` inside `transform_request` to decide per-model request fixes, and
         # `BaseTransformer._normalize_request` strips it again on the way out. Setting it afterwards,
