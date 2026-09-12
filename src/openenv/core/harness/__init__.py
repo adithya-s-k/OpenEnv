@@ -159,6 +159,11 @@ class TraceEntry(TypedDict, total=False):
     `reward` is a MIRROR of what `verify()` already returned, present so a persisted trace is
     self-describing. `verify()` remains the source of truth. `None` means UNSCORED and must never be
     coerced to 0.0: a rollout that failed to grade is excluded from the group baseline, not punished.
+
+    Only an ENVIRONMENT can set `reward`. A capture proxy sees model calls, not task outcomes, so
+    `openenv.core.harness.capture.to_trace_entries` omits the key entirely rather than guessing. This
+    is a `total=False` TypedDict and every key is optional for exactly that reason: read `reward` with
+    `.get()`, because indexing it raises on any entry a proxy produced.
     """
 
     request: dict[

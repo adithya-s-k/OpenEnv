@@ -9,17 +9,24 @@ the conversation up to that turn, `completion_token_ids` is what it sampled, and
 are the behaviour-policy logprobs for exactly those sampled tokens. `to_turn_records` emits it, and
 it is lossless because nothing is ever re-derived.
 
-Everything else in this module is an ADAPTER to some consumer's existing shape, and adapters lose
-information. `to_trace_entries` produces TRL's `TraceEntry`
-(`{request, response, completion_token_ids, per_token_logps}`), which has no field for the prompt's
-token ids — so a consumer of it must re-render the prompt with `apply_chat_template` to recover
-them. That re-render is not free: measured against Qwen3.5 it was 0/6 turns exact, off by two tokens
-every turn, until thinking was disabled. A prompt that differs by one token from what the model saw
-looks like divergence, and a long conversation silently fragments into several short ones.
+`to_trace_entries` is an ADAPTER to TRL's `TraceEntry` shape, and it now carries the same ids plus
+the message bodies a harness-facing consumer expects. It USED TO DROP the prompt ids, and this
+docstring used to tell you to re-render the prompt with `apply_chat_template` to recover them. That
+advice was wrong and expensive, so it is recorded here rather than deleted: measured against Qwen3.5
+the re-render was 0/6 turns exact, off by two tokens every turn, until thinking was disabled — and on
+Qwen3.5-4B, whose `enable_thinking` default is inverted relative to -2B's, it was 0 of 28. A prompt
+that differs by one token from what the model saw reads as divergence, so a long conversation
+silently fragments into several short ones and every fragment still trains. Nothing here re-renders
+anything any more, and `_turns_from_trace` on the TRL side now hard-fails rather than falling back to
+a re-render.
 
-So: new consumers should take `to_turn_records`. `to_trace_entries` exists to work with TRL as it is
-today, and `measure_retokenization_skew` exists to tell you what that costs for a given
-model + harness pair instead of guessing.
+`measure_retokenization_skew` stays, not as a cost estimate for a re-render you were going to do
+anyway, but as the measurement that catches a producer which has quietly stopped emitting ids.
+
+WHAT THIS MODULE CANNOT FILL IN. `TraceEntry` also declares `reward`, and nothing here emits it: a
+capture proxy sees model calls, not task outcomes, and inventing a number would be worse than
+omitting one. An ENVIRONMENT fills it in from its own `verify()`. `TraceEntry` is `total=False`, so
+read it with `.get("reward")` — indexing it raises on every entry this module produces.
 """
 
 from __future__ import annotations
