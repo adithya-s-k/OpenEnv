@@ -33,7 +33,6 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-
 from openenv.core.harness.capture import to_trace_entries
 from openenv.core.harness.capture.export import export_session
 from openenv.core.harness.capture.runner import CaptureServer
@@ -78,7 +77,11 @@ class _TokenEngine:
                     "logprobs": {"content": [{"logprob": -0.5} for _ in completion]},
                 }
             ],
-            "usage": {"prompt_tokens": len(prompt), "completion_tokens": 2, "total_tokens": 0},
+            "usage": {
+                "prompt_tokens": len(prompt),
+                "completion_tokens": 2,
+                "total_tokens": 0,
+            },
         }
 
 
@@ -94,7 +97,9 @@ def server():
     # Seed the ENGINE POOL, not only the default: a session that names its own upstream resolves
     # through the pool, which is what lets one server drive a train-tier engine and an eval-tier one
     # at the same time. Without this the proxy would probe `engine.invalid` for real.
-    srv.app.state.upstreams._by_engine[Upstream(llm_url=LLM_URL, model=MODEL).cache_key] = (
+    srv.app.state.upstreams._by_engine[
+        Upstream(llm_url=LLM_URL, model=MODEL).cache_key
+    ] = (
         engine,
         "tokens",
     )
@@ -104,7 +109,9 @@ def server():
 
 def _mint(server, **kwargs):
     return server.registry.create(
-        upstream=Upstream(llm_url=LLM_URL, model=MODEL), capture_level="tokens", **kwargs
+        upstream=Upstream(llm_url=LLM_URL, model=MODEL),
+        capture_level="tokens",
+        **kwargs,
     )
 
 
@@ -117,7 +124,9 @@ def _chat(client: TestClient, session_id: str) -> None:
 
 
 def _entries(server, session):
-    document = export_session(session, include_messages=True, capture_level=session.capture_level)
+    document = export_session(
+        session, include_messages=True, capture_level=session.capture_level
+    )
     return to_trace_entries(session.graph, document)
 
 
@@ -130,7 +139,9 @@ def test_entries_carry_the_engines_own_prompt_tokens(server):
     entries = _entries(server, session)
     assert len(entries) == 3
     for entry in entries:
-        assert entry["prompt_token_ids"], "an entry came back with no engine tokenisation"
+        assert entry["prompt_token_ids"], (
+            "an entry came back with no engine tokenisation"
+        )
         assert entry["completion_token_ids"]
         assert len(entry["per_token_logps"]) == len(entry["completion_token_ids"])
         # The mask spans prompt + completion, and only the completion is trained.
@@ -141,7 +152,10 @@ def test_entries_carry_the_engines_own_prompt_tokens(server):
 
     # THE CONTRACT: turn k+1's prompt is everything before it, token for token.
     first, second = entries[0], entries[1]
-    assert second["prompt_token_ids"] == first["prompt_token_ids"] + first["completion_token_ids"]
+    assert (
+        second["prompt_token_ids"]
+        == first["prompt_token_ids"] + first["completion_token_ids"]
+    )
 
 
 def test_deleting_a_session_releases_it(server):

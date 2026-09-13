@@ -868,7 +868,6 @@ def create_app(
         api_type: APIType = detect(f"/{path}", headers, body)
         transformer = app.state.transforms.get(api_type)
 
-
         original_request = dict(body)
         # Include the query string: Google puts `alt=sse` there, not in the body.
         full_target = (
