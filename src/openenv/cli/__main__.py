@@ -43,9 +43,9 @@ app.add_typer(
     name="harbor",
     help="Run Harbor tasks with token-level capture (requires: pip install openenv[harbor])",
 )
-app.command(
-    name="validate", help="Validate environment structure and deployment readiness"
-)(validate.validate)
+app.command(name="validate", help="Validate a package against the OpenEnv quality bar")(
+    validate.validate
+)
 app.command(
     name="push",
     help="Push an OpenEnv environment to Hugging Face Spaces or custom registry",
