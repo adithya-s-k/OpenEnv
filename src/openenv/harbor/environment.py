@@ -81,7 +81,7 @@ class HarborEnvironment(MCPEnvironment):
         mcp = FastMCP("harbor_env")
 
         @mcp.tool
-        def run_rollout(
+        async def run_rollout(
             split: str = "",
             task_index: int = 0,
             harness: str = "opencode",
@@ -113,7 +113,7 @@ class HarborEnvironment(MCPEnvironment):
             server — the dataset tree and the sandbox templates are the expensive things to host, and
             the engine is the cheap, changing part.
             """
-            return self._run_rollout(
+            return await self._run_rollout(
                 split,
                 task_index,
                 harness,
@@ -219,7 +219,7 @@ class HarborEnvironment(MCPEnvironment):
 
         return HarborService.current()
 
-    def _run_rollout(
+    async def _run_rollout(
         self,
         split: str,
         task_index: int,
@@ -235,8 +235,6 @@ class HarborEnvironment(MCPEnvironment):
         agent_timeout_sec: float = 0.0,
         agent_step_limit: int = 0,
     ) -> str:
-        from openenv.core.utils import run_async_safely
-
         from .models import HarborRolloutResult
         from .rollout import run_rollout as _run
 
@@ -257,9 +255,17 @@ class HarborEnvironment(MCPEnvironment):
                 ok=False, error=str(exc)[:400], harness=harness, sandbox=sandbox
             ).model_dump_json()
 
-        # Not `asyncio.run`: this handler is reached from the MCP server, which is already inside a
-        # running loop under ASGI, and `asyncio.run` raises there. The helper runs the coroutine on
-        # a worker thread when a loop is already going.
+        # This tool is `async` on purpose. FastMCP dispatches a SYNC tool body through
+        # `anyio.to_thread.run_sync` with no limiter (`fastmcp/utilities/async_utils.py`), which
+        # uses anyio's default `CapacityLimiter(40)` — and the body holds that worker thread for the
+        # whole rollout. That capped the server at 40 concurrent rollouts no matter what
+        # `MAX_CONCURRENT_ENVS` said, and invisibly: `rollout.py` starts its clock inside the body,
+        # after admission, so queue time never appeared in `wall_s`. Measured 40 concurrent for a
+        # sync tool vs 400 for an async one at the same request count.
+        #
+        # Staying on the loop also keeps Harbor's teardown correct: `Trial._finalize` SHIELDS
+        # `agent_environment.stop(...)`, and the old `asyncio.run`-per-rollout closed the loop as
+        # soon as the coroutine returned, cancelling that shielded task and leaking the sandbox.
         async def _resolve_and_run():
             """Settle which engine serves this rollout, then run it.
 
@@ -310,7 +316,7 @@ class HarborEnvironment(MCPEnvironment):
                 agent_step_limit=agent_step_limit or None,
             )
 
-        result = run_async_safely(_resolve_and_run())
+        result = await _resolve_and_run()
 
         self._state.rollouts_completed += 1
         self._state.last_reward = result.reward
