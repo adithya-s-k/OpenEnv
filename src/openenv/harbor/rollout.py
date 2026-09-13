@@ -433,12 +433,27 @@ async def run_rollout(
         #
         # inf and nan are rejected too, though they coerce fine: inf reads as solved downstream, and
         # nan poisons any average computed over a batch of rewards.
-        try:
-            result.rewards = {k: _finite_reward(k, v) for k, v in rewards.items()}
-        except (TypeError, ValueError) as exc:
-            result.ok = False
-            result.error = f"verifier returned an unusable reward: {exc}"
-            result.rewards = {}
+        #
+        # PER KEY, not all-or-nothing. A dict comprehension inside one try meant a single unusable
+        # key discarded EVERY key and failed the whole rollout -- so a suite emitting
+        # `tool_efficiency: null` alongside a perfectly good `correctness` lost the correctness too.
+        # That is not hypothetical: it dropped 86 of 250 tasks from one scored run while the summary
+        # reported clean numbers over the remaining two thirds. An unmeasured key is an EXCLUSION,
+        # never a zero, so the key is dropped and named in `findings` rather than coerced to 0.0.
+        # The rollout only fails if the key actually being trained on is the unusable one, which
+        # `_pick_reward` decides below.
+        unusable: list[str] = []
+        usable: dict[str, float] = {}
+        for key, value in rewards.items():
+            try:
+                usable[key] = _finite_reward(key, value)
+            except (TypeError, ValueError) as exc:
+                unusable.append(f"{key}={value!r} ({exc})")
+        result.rewards = usable
+        if unusable:
+            result.findings.append(
+                "[WARN] verifier keys dropped as unusable: " + "; ".join(unusable)
+            )
         try:
             result.reward, result.reward_key = _pick_reward(result.rewards, reward_key)
         except ValueError as exc:
